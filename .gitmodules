@@ -1,0 +1,3 @@
+[submodule "libvirt-rust"]
+	path = libvirt-rust
+	url = https://gitlab.com/libvirt/libvirt-rust.git
