@@ -2,10 +2,11 @@
 
 use std::error::Error;
 
-use cursive::align::HAlign;
 use cursive::event::Event;
 use cursive::view::{Finder, IntoBoxedView, Nameable, Resizable};
-use cursive::views::{Button, LinearLayout, PaddedView, Panel, ScrollView, TextView, ViewRef};
+use cursive::views::{
+    Button, Dialog, DummyView, HideableView, LinearLayout, Panel, ScrollView, TextView, ViewRef,
+};
 use cursive::{Cursive, CursiveExt, View};
 
 mod ui;
@@ -30,18 +31,13 @@ fn setup_ui(siv: &mut Cursive) {
     siv.set_global_callback('q', Cursive::quit);
     siv.set_global_callback(Event::Refresh, with_ud_and_then(Virt::machines, refresh));
 
-    let view = LinearLayout::vertical()
-        .child(
-            Panel::new(ScrollView::new(
-                LinearLayout::vertical().with_name("machines"),
-            ))
-            .title("Machines"),
-        )
-        .child(Button::new("Quit", Cursive::quit));
+    let view = ScrollView::new(LinearLayout::vertical().with_name("machines"));
 
-    let view = PaddedView::lrtb(1, 1, 1, 1, view);
+    let dialog = Dialog::around(view)
+        .title("Machines")
+        .button("Quit", Cursive::quit);
 
-    siv.add_layer(view);
+    siv.add_layer(dialog);
 }
 
 fn refresh(siv: &mut Cursive, vms: Vec<Machine>) -> Result<(), DynErr> {
@@ -66,43 +62,75 @@ fn refresh(siv: &mut Cursive, vms: Vec<Machine>) -> Result<(), DynErr> {
 
 fn empty_vm_panel() -> Box<dyn View> {
     Panel::new(
-        LinearLayout::horizontal()
+        LinearLayout::vertical()
             .child(
-                TextView::empty().with_name("state").min_width(15),
+                LinearLayout::horizontal()
+                    .child(
+                        TextView::empty()
+                            .with_name("name")
+                            .min_width(15)
+                            .max_width(60),
+                    )
+                    .child(
+                        HideableView::new(Button::new("", nop))
+                            .hidden()
+                            .with_name("button")
+                            .fixed_width(9),
+                    ),
             )
             .child(
-                LinearLayout::vertical()
-                    .child(Button::new("Start", nop).disabled().with_name("start"))
-                    .child(Button::new("Stop", nop).disabled().with_name("stop")),
+                LinearLayout::horizontal()
+                    .child(TextView::new("").with_name("state"))
+                    .child(DummyView)
+                    .child(TextView::new("").with_name("cpu")),
             ),
     )
-    .title_position(HAlign::Left)
     .into_boxed_view()
 }
 
 fn update(child: Option<&mut dyn View>, vm: Machine) -> Option<()> {
     let panel: &mut Panel<LinearLayout> = child?.downcast_mut()?;
+    let mut name = panel.find_name::<TextView>("name")?;
     let mut state = panel.find_name::<TextView>("state")?;
-    let mut start = panel.find_name::<Button>("start")?;
-    let mut stop = panel.find_name::<Button>("stop")?;
+    let mut button = panel.find_name::<HideableView<Button>>("button")?;
 
-    if vm.state != 1 {
-        let name = vm.name.clone();
-        start.enable();
-        start.set_callback(with_ud(move |v: &mut Virt| v.start(&name)));
-    } else {
-        start.disable();
+    let state_label = format!("{}", vm.state);
+    let name_changed = name.get_content().source() != &vm.name;
+    let state_changed = state.get_content().source() != &state_label;
+
+    if name_changed || state_changed {
+        match vm.state {
+            5 => {
+                button.set_visible(true);
+                button.get_inner_mut().set_label("Start");
+                button.get_inner_mut().set_callback(start(vm.name.clone()));
+            }
+            1 => {
+                button.set_visible(true);
+                button.get_inner_mut().set_label("Stop");
+                button.get_inner_mut().set_callback(stop(vm.name.clone()));
+            }
+            _ => {
+                button.set_visible(false);
+            }
+        }
     }
 
-    if vm.state != 5 {
-        let name = vm.name.clone();
-        stop.enable();
-        stop.set_callback(with_ud(move |v: &mut Virt| v.stop(&name)));
-    } else {
-        stop.disable();
+    if name_changed {
+        name.set_content(vm.name);
     }
 
-    panel.set_title(vm.name);
-    state.set_content(format!("{}", vm.state));
+    if state_changed {
+        state.set_content(state_label);
+    }
+
     Some(())
+}
+
+fn start(name: String) -> impl Fn(&mut Cursive) {
+    with_ud(move |v: &mut Virt| v.start(&name))
+}
+
+fn stop(name: String) -> impl Fn(&mut Cursive) {
+    with_ud(move |v: &mut Virt| v.stop(&name))
 }

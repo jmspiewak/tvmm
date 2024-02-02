@@ -3,6 +3,7 @@ use cursive::Cursive;
 
 use crate::DynErr;
 
+
 pub fn nop(_: &mut Cursive) {}
 
 pub fn with_ud<D, F>(f: F) -> impl Fn(&mut Cursive)
