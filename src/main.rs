@@ -94,18 +94,18 @@ fn update(child: Option<&mut dyn View>, vm: Machine) -> Option<()> {
     let mut state = panel.find_name::<TextView>("state")?;
     let mut button = panel.find_name::<HideableView<Button>>("button")?;
 
-    let state_label = format!("{}", vm.state);
+    let state_label = vm.state.label();
     let name_changed = name.get_content().source() != &vm.name;
-    let state_changed = state.get_content().source() != &state_label;
+    let state_changed = state.get_content().source() != state_label;
 
     if name_changed || state_changed {
         match vm.state {
-            5 => {
+            State::Shutoff => {
                 button.set_visible(true);
                 button.get_inner_mut().set_label("Start");
                 button.get_inner_mut().set_callback(start(vm.name.clone()));
             }
-            1 => {
+            State::Running => {
                 button.set_visible(true);
                 button.get_inner_mut().set_label("Stop");
                 button.get_inner_mut().set_callback(stop(vm.name.clone()));
