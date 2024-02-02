@@ -1,6 +1,8 @@
 #![feature(iterator_try_collect)]
+#![feature(option_zip)]
 
 use std::error::Error;
+use std::ops::Deref;
 
 use cursive::event::Event;
 use cursive::view::{Finder, IntoBoxedView, Nameable, Resizable};
@@ -92,10 +94,11 @@ fn update(child: Option<&mut dyn View>, vm: Machine) -> Option<()> {
     let panel: &mut Panel<LinearLayout> = child?.downcast_mut()?;
     let mut name = panel.find_name::<TextView>("name")?;
     let mut state = panel.find_name::<TextView>("state")?;
+    let mut cpu = panel.find_name::<TextView>("cpu")?;
     let mut button = panel.find_name::<HideableView<Button>>("button")?;
 
     let state_label = vm.state.label();
-    let name_changed = name.get_content().source() != &vm.name;
+    let name_changed = name.get_content().source() != vm.name.deref();
     let state_changed = state.get_content().source() != state_label;
 
     if name_changed || state_changed {
@@ -122,15 +125,24 @@ fn update(child: Option<&mut dyn View>, vm: Machine) -> Option<()> {
 
     if state_changed {
         state.set_content(state_label);
+
+        if vm.state != State::Running && cpu.get_content().source() != "" {
+            cpu.set_content("");
+        }
+    }
+
+    if vm.state == State::Running {
+        let percent = (100.0 * vm.cpu.unwrap_or(0.0)).round() as u8;
+        cpu.set_content(format!("[{:3}%]", percent));
     }
 
     Some(())
 }
 
-fn start(name: String) -> impl Fn(&mut Cursive) {
+fn start(name: Box<str>) -> impl Fn(&mut Cursive) {
     with_ud(move |v: &mut Virt| v.start(&name))
 }
 
-fn stop(name: String) -> impl Fn(&mut Cursive) {
+fn stop(name: Box<str>) -> impl Fn(&mut Cursive) {
     with_ud(move |v: &mut Virt| v.stop(&name))
 }
