@@ -132,8 +132,8 @@ fn update(child: Option<&mut dyn View>, vm: Machine) -> Option<()> {
     }
 
     if vm.state == State::Running {
-        let percent = (100.0 * vm.cpu.unwrap_or(0.0)).round() as u8;
-        cpu.set_content(format!("[{:3}%]", percent));
+        let percent = 100.0 * vm.cpu.unwrap_or(0.0);
+        cpu.set_content(format!("[{:5.1}%]", percent));
     }
 
     Some(())
