@@ -1,19 +1,23 @@
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::time::{Duration, Instant};
+use std::{
+    fmt::Display,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
-use virt::connect::Connect;
-use virt::domain::Domain;
+use virt::{connect::Connect, domain::Domain};
 
 use crate::DynErr;
+
 
 const URI: &str = "qemu:///system";
 
 #[derive(Debug, Clone)]
-pub struct Machine {
-    pub name: Box<str>,
+pub struct VmInfo {
+    pub name: String,
     pub state: State,
-    pub cpu: Option<f64>,
+    pub ncpus: u32,
+    pub cpu: Duration,
+    pub timestamp: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,21 +71,16 @@ impl From<u32> for State {
     }
 }
 
-struct LastInfo {
-    timestamp: Instant,
-    cpu: Duration,
-}
 
+#[derive(Clone)]
 pub struct Virt {
     conn: Connect,
-    last: HashMap<Box<str>, LastInfo>,
 }
 
 impl Virt {
     pub fn new() -> Result<Virt, DynErr> {
         Ok(Virt {
             conn: Connect::open(Some(URI))?,
-            last: HashMap::new(),
         })
     }
 
@@ -91,45 +90,39 @@ impl Virt {
     }
 
     pub fn stop(&self, name: &str) -> Result<(), DynErr> {
-        Domain::lookup_by_name(&self.conn, name)?.shutdown()?;
+        let vm = Domain::lookup_by_name(&self.conn, name)?;
+
+        loop {
+            vm.shutdown()?;
+            sleep(Duration::from_secs(1));
+
+            if let Ok((state, _)) = vm.get_state() {
+                if State::from(state) == State::Running {
+                    continue;
+                }
+            }
+
+            break;
+        }
+
         Ok(())
     }
 
-    pub fn machines(&mut self) -> Result<Vec<Machine>, DynErr> {
-        let mut vms = self
-            .conn
+    pub fn machines(&self) -> Result<Vec<VmInfo>, DynErr> {
+        self.conn
             .list_all_domains(0)?
             .into_iter()
             .map(|dom| {
-                let name = dom.get_name()?.into_boxed_str();
                 let info = dom.get_info()?;
-                let state = info.state.into();
-                let cpu = Duration::from_nanos(info.cpu_time);
-                let now = Instant::now();
 
-                let new_last = LastInfo {
-                    timestamp: now,
-                    cpu,
-                };
-
-                let cpu = if let Some(last) = self.last.get_mut(&name) {
-                    let dcpu = cpu.checked_sub(last.cpu);
-                    let dt = now.checked_duration_since(last.timestamp);
-                    *last = new_last;
-
-                    dcpu.zip_with(dt, |dcpu, dt| {
-                        dcpu.as_secs_f64() / dt.as_secs_f64() / info.nr_virt_cpu as f64
-                    })
-                } else {
-                    self.last.insert(name.clone(), new_last);
-                    None
-                };
-
-                Ok::<_, virt::error::Error>(Machine { name, state, cpu })
+                Ok(VmInfo {
+                    name: dom.get_name()?,
+                    state: info.state.into(),
+                    ncpus: info.nr_virt_cpu,
+                    cpu: Duration::from_nanos(info.cpu_time),
+                    timestamp: Instant::now(),
+                })
             })
-            .try_collect::<Vec<_>>()?;
-
-        vms.sort_by(|x, y| x.name.cmp(&y.name));
-        Ok(vms)
+            .try_collect()
     }
 }

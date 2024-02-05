@@ -1,148 +1,208 @@
+#![feature(hash_extract_if)]
 #![feature(iterator_try_collect)]
 #![feature(option_zip)]
+#![feature(type_alias_impl_trait)]
+#![feature(unwrap_infallible)]
 
-use std::error::Error;
-use std::ops::Deref;
-
-use cursive::event::Event;
-use cursive::view::{Finder, IntoBoxedView, Nameable, Resizable};
-use cursive::views::{
-    Button, Dialog, DummyView, HideableView, LinearLayout, Panel, ScrollView, TextView, ViewRef,
+use std::{
+    collections::HashMap,
+    error::Error,
+    panic::resume_unwind,
+    thread,
+    time::{Duration, Instant},
 };
-use cursive::{Cursive, CursiveExt, View};
+
+use cursive::reexports::crossbeam_channel::{
+    select, unbounded, Receiver, Sender,
+};
+use gag::Hold;
+use rusty_pool::ThreadPool;
+use ui::{Action, ButtonId};
+use vm::{State, Virt, VmInfo};
 
 mod ui;
 mod vm;
-use ui::*;
-use vm::*;
 
-type DynErr = Box<dyn Error + 'static>;
+
+pub type DynErr = Box<dyn Error + Send + Sync + 'static>;
 
 fn main() -> Result<(), DynErr> {
-    let virt = Virt::new()?;
-    let mut siv = Cursive::new();
+    let ui = ui::create();
 
-    siv.set_user_data(virt);
-    setup_ui(&mut siv);
-    siv.run();
-    Ok(())
+    let worker = thread::Builder::new()
+        .name("worker".into())
+        .spawn(move || worker(ui.actions, ui.controller))?;
+
+    let hold = Hold::stderr()?;
+    ui.runner.run();
+    drop(hold);
+
+    worker.join().map_err(resume_unwind).into_ok()
 }
 
-fn setup_ui(siv: &mut Cursive) {
-    siv.set_fps(4);
-    siv.set_global_callback('q', Cursive::quit);
-    siv.set_global_callback(Event::Refresh, with_ud_and_then(Virt::machines, refresh));
+fn worker(actions: ui::Actions, ui: ui::Controller) -> Result<(), DynErr> {
+    let threadpool = rusty_pool::Builder::new()
+        .name("start/stop".into())
+        .core_size(0)
+        .max_size(4)
+        .build();
 
-    let view = ScrollView::new(LinearLayout::vertical().with_name("machines"));
+    let mut ws = WorkerState {
+        ui,
+        virt: Virt::new()?,
+        threadpool,
+        vms: HashMap::new(),
+        failures: unbounded(),
+    };
 
-    let dialog = Dialog::around(view)
-        .title("Machines")
-        .button("Quit", Cursive::quit);
+    refresh(&mut ws);
+    ws.ui.connected();
 
-    siv.add_layer(dialog);
-}
+    loop {
+        select! {
+            recv(actions) -> action => {
+                if let Ok(action) = action {
+                    handle_action(&mut ws, action);
+                } else {
+                    break;
+                }
+            },
 
-fn refresh(siv: &mut Cursive, vms: Vec<Machine>) -> Result<(), DynErr> {
-    let mut layout: ViewRef<LinearLayout> = siv
-        .find_name("machines")
-        .ok_or("refresh: 'Machines' panel is missing")?;
-
-    for i in (vms.len()..layout.len()).rev() {
-        layout.remove_child(i);
-    }
-
-    for _ in layout.len()..vms.len() {
-        layout.add_child(empty_vm_panel());
-    }
-
-    for (i, vm) in vms.into_iter().enumerate() {
-        update(layout.get_child_mut(i), vm).ok_or("refresh: can't update")?;
-    }
-
-    Ok(())
-}
-
-fn empty_vm_panel() -> Box<dyn View> {
-    Panel::new(
-        LinearLayout::vertical()
-            .child(
-                LinearLayout::horizontal()
-                    .child(
-                        TextView::empty()
-                            .with_name("name")
-                            .min_width(15)
-                            .max_width(60),
-                    )
-                    .child(
-                        HideableView::new(Button::new("", nop))
-                            .hidden()
-                            .with_name("button")
-                            .fixed_width(9),
-                    ),
-            )
-            .child(
-                LinearLayout::horizontal()
-                    .child(TextView::new("").with_name("state"))
-                    .child(DummyView)
-                    .child(TextView::new("").with_name("cpu")),
-            ),
-    )
-    .into_boxed_view()
-}
-
-fn update(child: Option<&mut dyn View>, vm: Machine) -> Option<()> {
-    let panel: &mut Panel<LinearLayout> = child?.downcast_mut()?;
-    let mut name = panel.find_name::<TextView>("name")?;
-    let mut state = panel.find_name::<TextView>("state")?;
-    let mut cpu = panel.find_name::<TextView>("cpu")?;
-    let mut button = panel.find_name::<HideableView<Button>>("button")?;
-
-    let state_label = vm.state.label();
-    let name_changed = name.get_content().source() != vm.name.deref();
-    let state_changed = state.get_content().source() != state_label;
-
-    if name_changed || state_changed {
-        match vm.state {
-            State::Shutoff => {
-                button.set_visible(true);
-                button.get_inner_mut().set_label("Start");
-                button.get_inner_mut().set_callback(start(vm.name.clone()));
-            }
-            State::Running => {
-                button.set_visible(true);
-                button.get_inner_mut().set_label("Stop");
-                button.get_inner_mut().set_callback(stop(vm.name.clone()));
-            }
-            _ => {
-                button.set_visible(false);
+            recv(ws.failures.1) -> failure => {
+                handle_failure(&mut ws, failure.unwrap());
             }
         }
     }
 
-    if name_changed {
-        name.set_content(vm.name);
+    Ok(())
+}
+
+
+struct WorkerState {
+    ui: ui::Controller,
+    virt: Virt,
+    threadpool: ThreadPool,
+    vms: HashMap<String, VmState>,
+    failures: (Sender<Failure>, Receiver<Failure>),
+}
+
+struct VmState {
+    state: State,
+    cpu: Duration,
+    timestamp: Instant,
+    exists: bool,
+}
+
+struct Failure {
+    vm: String,
+    error: String,
+}
+
+impl VmState {
+    fn label(&self) -> String {
+        self.state.label().into()
     }
 
-    if state_changed {
-        state.set_content(state_label);
-
-        if vm.state != State::Running && cpu.get_content().source() != "" {
-            cpu.set_content("");
+    fn btn(&self) -> ButtonId {
+        match self.state {
+            State::Running => ButtonId::Stop,
+            State::Shutoff => ButtonId::Start,
+            _ => ButtonId::None,
         }
     }
+}
 
-    if vm.state == State::Running {
-        let percent = 100.0 * vm.cpu.unwrap_or(0.0);
-        cpu.set_content(format!("[{:5.1}%]", percent));
+
+fn handle_action(ws: &mut WorkerState, action: Action) {
+    match action {
+        Action::Refresh => refresh(ws),
+        Action::Start(name) => start_stop(ws, name, Virt::start),
+        Action::Stop(name) => start_stop(ws, name, Virt::stop),
+    }
+}
+
+fn handle_failure(ws: &mut WorkerState, failure: Failure) {
+    if let Some(vm) = ws.vms.get_mut(&failure.vm) {
+        ws.ui.error(failure.error, false);
+        ws.ui.set_state(failure.vm, vm.label(), vm.btn());
+    }
+}
+
+fn start_stop(
+    ws: &mut WorkerState,
+    name: String,
+    action: fn(&Virt, &str) -> Result<(), DynErr>,
+) {
+    let virt = ws.virt.clone();
+    let failure = ws.failures.0.clone();
+
+    ws.threadpool.execute(move || {
+        if let Err(e) = action(&virt, &name) {
+            let _ = failure.send(Failure {
+                vm: name,
+                error: e.to_string(),
+            });
+        }
+    })
+}
+
+fn refresh(ws: &mut WorkerState) {
+    let vms = match ws.virt.machines() {
+        Ok(x) => x,
+        Result::Err(e) => {
+            ws.ui.error(e.to_string(), false);
+            ws.ui.clear_vms();
+            ws.vms.clear();
+            return;
+        }
+    };
+
+    for vm in ws.vms.values_mut() {
+        vm.exists = false;
     }
 
-    Some(())
+    for vm in vms {
+        refresh_vm(ws, vm);
+    }
+
+    for (name, _) in ws.vms.extract_if(|_, v| !v.exists) {
+        ws.ui.remove_vm(name);
+    }
 }
 
-fn start(name: Box<str>) -> impl Fn(&mut Cursive) {
-    with_ud(move |v: &mut Virt| v.start(&name))
-}
+fn refresh_vm(ws: &mut WorkerState, vm: VmInfo) {
+    let new = VmState {
+        state: vm.state,
+        cpu: vm.cpu,
+        timestamp: vm.timestamp,
+        exists: true,
+    };
 
-fn stop(name: Box<str>) -> impl Fn(&mut Cursive) {
-    with_ud(move |v: &mut Virt| v.stop(&name))
+    if let Some(old) = ws.vms.get_mut(&vm.name) {
+        if old.state != new.state {
+            ws.ui.set_state(
+                vm.name.clone(),
+                new.state.label().into(),
+                new.btn(),
+            );
+        }
+
+        if new.state == State::Running && old.state == State::Running {
+            let dcpu = new.cpu.checked_sub(old.cpu);
+            let dt = new.timestamp.checked_duration_since(old.timestamp);
+
+            let cpu = if let Some((dcpu, dt)) = dcpu.zip(dt) {
+                dcpu.as_secs_f64() / dt.as_secs_f64() / vm.ncpus as f64
+            } else {
+                f64::NAN
+            };
+
+            ws.ui.set_cpu(vm.name, cpu);
+        }
+
+        *old = new;
+    } else {
+        ws.ui.add_vm(vm.name.clone(), new.label(), new.btn());
+        ws.vms.insert(vm.name, new);
+    }
 }
