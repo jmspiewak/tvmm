@@ -1,6 +1,11 @@
 [package]
 name = "tvmm"
 version = "0.1.0"
+readme = "README.md"
+repository = "https://github.com/jmspiewak/tvmm"
+categories = ["command-line-utilities"]
+license = "MPL-2.0"
+license-file = "LICENSE.txt"
 edition = "2021"
 
 [dependencies]
