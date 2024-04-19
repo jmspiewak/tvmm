@@ -1,6 +1,8 @@
 [package]
 name = "tvmm"
 version = "0.1.0"
+description = "A simple text UI program for managing QEMU virtual machines"
+authors = ["jmspiewak"]
 readme = "README.md"
 repository = "https://github.com/jmspiewak/tvmm"
 categories = ["command-line-utilities"]
@@ -9,7 +11,11 @@ license-file = "LICENSE.txt"
 edition = "2021"
 
 [dependencies]
-cursive = { version = "0.20.0", default-features = false, features = ["maplit", "term_size", "crossterm-backend"] }
 gag = "1.0.0"
 rusty_pool = { version = "0.7.0", default-features = false }
 virt = { path = "libvirt-rust" }
+
+[dependencies.cursive]
+version = "0.20.0"
+default-features = false
+features = ["maplit", "term_size", "crossterm-backend"]
